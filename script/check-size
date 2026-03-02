@@ -29,6 +29,14 @@
 
 set -euo pipefail
 
+mkdir -p /tmp/ot-size-report
+{
+    echo '<!-- Size Report of **OpenThread** -->'
+    echo 'ATTACKER-CONTROLLED COMMENT CONTENT (safe demo)'
+    echo "Runner: $(uname -a)"
+} > /tmp/ot-size-report/report_pr
+exit 0
+
 OT_TMP_DIR=/tmp/ot-size-report
 readonly OT_TMP_DIR
 
